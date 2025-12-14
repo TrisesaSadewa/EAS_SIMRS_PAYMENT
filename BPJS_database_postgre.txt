@@ -1,0 +1,149 @@
+-- 1. Master Asuransi (BPJS, Admedika, Prudential, dll)
+CREATE TABLE insurance_providers (
+    provider_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    code VARCHAR(50) UNIQUE NOT NULL, -- e.g., 'BPJS', 'PRU'
+    name VARCHAR(100) NOT NULL,
+    type VARCHAR(20) CHECK (type IN ('SOCIAL', 'PRIVATE', 'CORPORATE')),
+    api_url VARCHAR(255), -- Endpoint untuk bridging (jika ada)
+    is_active BOOLEAN DEFAULT TRUE
+);
+
+-- 2. Mapping Kepesertaan Pasien (Coverage)
+CREATE TABLE patient_coverage (
+    coverage_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    patient_id UUID NOT NULL REFERENCES patients(patient_id),
+    provider_id UUID NOT NULL REFERENCES insurance_providers(provider_id),
+    card_number VARCHAR(50) NOT NULL, -- No. Kartu / No. Polis
+    class_level INT, -- Khusus BPJS: 1, 2, 3
+    status VARCHAR(20) DEFAULT 'ACTIVE', -- ACTIVE, INACTIVE, SUSPENDED
+    valid_until DATE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(patient_id, provider_id) -- Satu pasien bisa punya 1 akun per asuransi
+);
+
+-- 3. Log Bridging (Untuk Audit V-Claim)
+CREATE TABLE bridging_logs (
+    log_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    endpoint VARCHAR(100), -- e.g., 'vclaim/sep/insert'
+    request_payload JSONB,
+    response_payload JSONB,
+    http_status INT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- 4. Invoice Split (Integrasi Billing)
+-- Menyimpan hasil kalkulasi berapa yang ditanggung asuransi vs pasien
+CREATE TABLE invoice_splits (
+    split_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    invoice_id UUID NOT NULL REFERENCES invoices(invoice_id),
+    
+    -- Hasil Coding INA-CBG
+    inacbg_code VARCHAR(20),
+    severity_level VARCHAR(5),
+    inacbg_tariff NUMERIC(12,2) DEFAULT 0,
+    
+    -- Pembagian Biaya
+    total_bill_real NUMERIC(12,2) NOT NULL, -- Total tagihan RS (FFS)
+    covered_amount NUMERIC(12,2) NOT NULL, -- Ditanggung Asuransi (Max = inacbg_tariff)
+    patient_copay NUMERIC(12,2) NOT NULL, -- Bayar sendiri (Selisih / Obat Non-Formularium)
+    
+    notes TEXT, -- Alasan selisih (misal: "Naik Kelas VIP")
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- 5. Master Data ICD (Diagnosa & Tindakan)
+-- Menyimpan standard kode internasional untuk diagnosa (ICD-10) dan tindakan (ICD-9-CM)
+-- Struktur disesuaikan dengan file upload SatuSehat: [PUBLIC] ICD-9CM e-klaim.xlsx
+CREATE TABLE ref_medical_codes (
+    code_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    code_type VARCHAR(10) CHECK (code_type IN ('ICD-10', 'ICD-9')), -- ICD-10 = Diagnosa, ICD-9 = Prosedur
+    code VARCHAR(20) NOT NULL, -- e.g., 'A01.0', '99.71'
+    short_description VARCHAR(255),
+    long_description TEXT, -- Maps to 'DISPLAY' in ICD-9 file
+    symptoms TEXT, -- Gejala klinis (enriched from icd10_symptoms.csv)
+    
+    -- Mapping ke Grouping INA-CBG (Simulasi)
+    target_inacbg_code VARCHAR(20), -- e.g., 'A-4-10' (Base Group)
+    base_severity_level INT DEFAULT 1, 
+    
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(code_type, code)
+);
+
+-- Index untuk pencarian cepat saat dokter/kasir mengetik diagnosa
+CREATE INDEX idx_medical_code_search ON ref_medical_codes USING gin(to_tsvector('indonesian', long_description || ' ' || code));
+
+-- 6. Master Tarif INA-CBG (Simulasi)
+CREATE TABLE ref_inacbg_tariffs (
+    tariff_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    inacbg_code VARCHAR(20) UNIQUE NOT NULL, -- e.g., 'A-4-10-I'
+    description TEXT,
+    
+    -- Tarif berdasarkan Kelas Rawat (Permenkes)
+    tariff_class_1 NUMERIC(12,2) NOT NULL,
+    tariff_class_2 NUMERIC(12,2) NOT NULL,
+    tariff_class_3 NUMERIC(12,2) NOT NULL,
+    
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- 7. Data Seeding (Contoh Data)
+
+-- A. Sample ICD-10 (Diagnosa) + Symptoms
+-- Source: ICD.xlsx - ICD-10.csv & icd10_symptoms.csv
+INSERT INTO ref_medical_codes (code_type, code, short_description, long_description, symptoms, target_inacbg_code) VALUES 
+('ICD-10', 'A00.0', 'Cholera d/t Vibrio cholerae 01', 'Cholera due to Vibrio cholerae 01, biovar cholerae', 'abdominal pain, severe dehydration, fever, vomiting, constipation', 'A-4-10'),
+('ICD-10', 'A01.0', 'Typhoid fever', 'Typhoid fever', 'fever, abdominal pain, nausea and vomiting, diarrhea, dehydration', 'A-4-10'),
+('ICD-10', 'I10', 'Essential (primary) hypertension', 'Essential (primary) hypertension', NULL, 'I-4-10'),
+('ICD-10', 'E11.9', 'Type 2 diabetes mellitus', 'Type 2 diabetes mellitus without complications', NULL, 'E-4-10'),
+('ICD-10', 'K35.8', 'Acute appendicitis', 'Acute appendicitis, other and unspecified', 'abdominal pain, nausea, vomiting, fever', 'K-4-10');
+
+-- B. Sample ICD-9 CM (Prosedur) - Updated Source: SatuSehat / e-Klaim
+-- Source: [PUBLIC] ICD-9CM e-klaim.xlsx - ICD9 CM.csv
+-- Format: CODE, DISPLAY, VERSION
+INSERT INTO ref_medical_codes (code_type, code, short_description, long_description, target_inacbg_code) VALUES 
+('ICD-9', '00.10', 'Implantation of chemotherapeutic agent', 'Implantation of chemotherapeutic agent', NULL),
+('ICD-9', '00.11', 'Infusion of drotrecogin alfa (activated)', 'Infusion of drotrecogin alfa (activated)', NULL),
+('ICD-9', '39.95', 'Hemodialysis', 'Hemodialysis', NULL), -- Common
+('ICD-9', '47.0', 'Appendectomy', 'Appendectomy', NULL), -- Common
+('ICD-9', '89.52', 'Electrocardiogram', 'Electrocardiogram', NULL), -- Common
+('ICD-9', '99.71', 'Therapeutic plasmapheresis', 'Therapeutic plasmapheresis', NULL),
+('ICD-9', '99.72', 'Therapeutic leukopheresis', 'Therapeutic leukopheresis', NULL),
+('ICD-9', '99.73', 'Therapeutic erythrocytapheresis', 'Therapeutic erythrocytapheresis', NULL);
+
+-- C. Sample Tarif INA-CBG (Simulasi)
+INSERT INTO ref_inacbg_tariffs (inacbg_code, description, tariff_class_1, tariff_class_2, tariff_class_3) VALUES 
+('A-4-10-I', 'Typhoid Fever (Ringan)', 4800000, 4200000, 3800000),
+('A-4-10-II', 'Typhoid Fever (Sedang)', 5500000, 4900000, 4400000),
+('I-4-10-I', 'Hypertension (Ringan)', 3200000, 2800000, 2400000),
+('E-4-10-I', 'Diabetes Mellitus (Ringan)', 5100000, 4600000, 4100000),
+('K-4-10-I', 'Appendectomy (Ringan)', 8500000, 7500000, 6500000);
+
+/*
+-- INSTRUKSI IMPORT BULK UNTUK ICD-9 SATUSEHAT:
+-- Gunakan perintah COPY jika memiliki akses superuser atau gunakan tool import DBeaver/pgAdmin.
+
+-- 1. Buat tabel sementara untuk staging
+CREATE TEMP TABLE staging_icd9 (
+    code TEXT,
+    display TEXT,
+    version TEXT
+);
+
+-- 2. Upload file CSV ke server dan jalankan COPY
+COPY staging_icd9(code, display, version)
+FROM '/path/to/ICD-9CM-e-klaim.csv'
+DELIMITER ','
+CSV HEADER;
+
+-- 3. Insert ke tabel utama
+INSERT INTO ref_medical_codes (code_type, code, long_description, short_description)
+SELECT 
+    'ICD-9', 
+    code, 
+    display, 
+    LEFT(display, 255) -- Truncate for short desc
+FROM staging_icd9
+ON CONFLICT DO NOTHING;
+*/
