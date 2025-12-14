@@ -116,6 +116,12 @@
                     </div>
                 </div>
             </div>
+            
+            <!-- MOCK API LOG (For Developer Clarity) -->
+            <div class="mt-4 p-4 border border-dashed border-gray-300 rounded-lg bg-gray-50 text-[10px] font-mono text-gray-500 hidden" id="api-log-container">
+                <p class="font-bold mb-1">API Bridging Log:</p>
+                <div id="api-log-content"></div>
+            </div>
 
         </section>
 
@@ -208,7 +214,7 @@
 
                     <!-- Result Right: Billing Implication -->
                     <div class="flex flex-col justify-center">
-                        <h3 class="text-white/60 text-xs font-bold uppercase tracking-wider mb-4">Estimasi Split Tagihan</h3>
+                        <h3 class="text-white/60 text-xs font-bold uppercase tracking-wider mb-4">Estimasi Split Billing</h3>
                         
                         <div class="space-y-3 text-sm">
                             <div class="flex justify-between">
@@ -221,19 +227,60 @@
                             </div>
                             <div class="h-px bg-white/20 my-2"></div>
                             <div class="flex justify-between text-lg">
-                                <span class="font-bold text-orange-300">Selisih / Eksese</span>
+                                <span class="font-bold text-orange-300">Selisih / Excess</span>
                                 <span class="font-bold text-orange-300" id="bill-excess">Rp 700.000</span>
                             </div>
                         </div>
 
                         <div class="mt-4 bg-orange-500/20 border border-orange-500/30 rounded p-3">
-                            <p class="text-xs text-orange-200 leading-tight">
+                            <p class="text-xs text-orange-200 leading-tight" id="split-warning">
                                 <i class="fa-solid fa-triangle-exclamation mr-1"></i>
                                 Tagihan RS melebihi tarif paket INA-CBG. Selisih ditanggung RS (kecuali naik kelas VIP).
                             </p>
                         </div>
+                        
+                        <button onclick="toggleBillDetails()" class="mt-4 w-full py-2 bg-white/10 hover:bg-white/20 rounded text-xs text-white font-bold transition-colors">
+                            Lihat Rincian Item Tagihan
+                        </button>
                     </div>
 
+                </div>
+            </div>
+            
+            <!-- 5. Detailed Split Billing Table (Hidden by default) -->
+            <div id="bill-details-section" class="hidden bg-white rounded-xl shadow-sm border border-gray-200 p-6 animate-fade-in-up">
+                <h3 class="font-bold text-gray-800 mb-4 flex items-center gap-2">
+                    <i class="fa-solid fa-list-check text-blue-600"></i> Rincian Split Billing
+                </h3>
+                
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm text-left">
+                        <thead class="bg-gray-50 text-gray-500 border-b border-gray-200">
+                            <tr>
+                                <th class="py-2 px-3 font-medium">Item Tagihan</th>
+                                <th class="py-2 px-3 font-medium text-right">Biaya RS</th>
+                                <th class="py-2 px-3 font-medium text-center">Status</th>
+                                <th class="py-2 px-3 font-medium text-right">Pasien Bayar</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-100" id="bill-table-body">
+                            <!-- Populated by JS -->
+                        </tbody>
+                        <tfoot class="bg-gray-50 font-bold border-t border-gray-200">
+                             <tr>
+                                <td class="py-3 px-3">Total Akhir</td>
+                                <td class="py-3 px-3 text-right" id="dt-total-real">Rp 0</td>
+                                <td class="py-3 px-3"></td>
+                                <td class="py-3 px-3 text-right text-orange-600" id="dt-total-patient">Rp 0</td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+                
+                <div class="mt-4 flex justify-end">
+                    <button class="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-bold shadow-sm">
+                        <i class="fa-solid fa-check mr-2"></i> Finalisasi & Kirim ke Kasir
+                    </button>
                 </div>
             </div>
 
@@ -250,7 +297,14 @@
         };
 
         // --- Mock Bill Data (To simulate Split Billing) ---
-        const currentBillTotal = 5200000; 
+        // Simulated items from Billing Core
+        const mockBillItems = [
+            { name: "Kamar Perawatan (3 Hari)", amount: 1500000, type: "room", coverable: true },
+            { name: "Visite Dokter Spesialis (3x)", amount: 450000, type: "service", coverable: true },
+            { name: "Obat & Farmasi (Standard)", amount: 2000000, type: "drug", coverable: true },
+            { name: "Laboratorium (Darah Lengkap)", amount: 500000, type: "lab", coverable: true },
+            { name: "Vitamin Tambahan (Non-Formularium)", amount: 750000, type: "drug", coverable: false } // Non-covered item
+        ];
 
         // 1. Check Eligibility Function
         function checkEligibility() {
@@ -261,6 +315,9 @@
             // Loading state
             btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i>';
             
+            // Log API call simulation
+            logApiCall('GET', `/vclaim/peserta/nokartu/${cardNo}/tglSEP/${new Date().toISOString().slice(0,10)}`);
+
             setTimeout(() => {
                 // Mock Backend Logic
                 if(cardNo.endsWith('0')) {
@@ -292,6 +349,13 @@
         function generateSEP() {
             const btn = document.getElementById('btn-create-sep');
             btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Memproses V-Claim...';
+            
+            // Log API call simulation
+            logApiCall('POST', '/vclaim/sep/insert', { 
+                noKartu: currentPatient.bpjs_card_no, 
+                tglSep: new Date().toISOString().slice(0,10),
+                jnsPelayanan: "1" 
+            });
 
             setTimeout(() => {
                 const randomId = Math.floor(Math.random() * 100000);
@@ -336,6 +400,12 @@
                 alert("Pilih diagnosa utama terlebih dahulu!");
                 return;
             }
+            
+            // Log API call simulation
+            logApiCall('POST', '/eklaim/grouper/stage1', { 
+                nomor_sep: currentPatient.sep_no,
+                diagnosa: primary 
+            });
 
             // Mock Calculation based on Python logic
             // Base Tariffs
@@ -357,8 +427,31 @@
             if(secondaries.length === 1) { severity = 2; severityCode = "II"; }
             if(secondaries.length >= 2) { severity = 3; severityCode = "III"; }
 
-            // Final Calc
-            const finalTariff = (data.base * multiplier) * (1 + (severity * 0.1)); // simplified math
+            // Final INA-CBG Tariff
+            const finalTariff = (data.base * multiplier) * (1 + (severity * 0.1)); 
+            
+            // Calculate Bill Totals from Mock Items
+            let totalBillReal = 0;
+            let totalPatientPay = 0; // Starts with non-covered items
+            
+            mockBillItems.forEach(item => {
+                totalBillReal += item.amount;
+                if (!item.coverable) {
+                    totalPatientPay += item.amount;
+                }
+            });
+            
+            // Calculate Excess (if bill exceeds tariff)
+            // Note: In strict INA-CBG, hospital absorbs the loss, patient pays nothing unless VIP upgrade.
+            // For this simulation, we show "Excess" as Hospital Loss (Surplus Negative)
+            const coveredByBPJS = Math.min(totalBillReal, finalTariff); // BPJS pays tariff or bill, whichever lower (usually tariff is fixed payment regardless of bill)
+            
+            // Correction: BPJS pays fixed Tariff. 
+            // If Bill > Tariff => Hospital Loss. 
+            // If Bill < Tariff => Hospital Profit.
+            // Patient only pays for Non-Coverable items.
+            
+            const hospitalDiff = finalTariff - (totalBillReal - totalPatientPay); // Revenue - Cost of covered items
             
             // Render Result
             const resDiv = document.getElementById('grouping-result');
@@ -372,26 +465,76 @@
             const fmt = (num) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(num);
             
             document.getElementById('res-tariff').innerText = fmt(finalTariff);
-            document.getElementById('bill-real').innerText = fmt(currentBillTotal);
-            document.getElementById('bill-covered').innerText = "- " + fmt(finalTariff);
+            document.getElementById('bill-real').innerText = fmt(totalBillReal);
+            document.getElementById('bill-covered').innerText = "- " + fmt(finalTariff); // Show tariff as coverage
             
-            const excess = currentBillTotal - finalTariff;
             const excessEl = document.getElementById('bill-excess');
-            excessEl.innerText = fmt(Math.abs(excess));
+            const splitWarning = document.getElementById('split-warning');
             
-            if(excess > 0) {
-                excessEl.className = "font-bold text-orange-300"; // Loss/Patient Pay
-                excessEl.parentElement.previousElementSibling.innerText = "Selisih (Rug/Bayar Sendiri)";
+            if (hospitalDiff < 0) {
+                 // Hospital Loss
+                 excessEl.innerText = fmt(Math.abs(hospitalDiff));
+                 excessEl.className = "font-bold text-red-300"; 
+                 excessEl.parentElement.previousElementSibling.innerText = "Defisit RS (Loss)";
+                 splitWarning.innerHTML = `<i class="fa-solid fa-triangle-exclamation mr-1"></i> Biaya RS melebihi tarif paket. RS menanggung rugi ${fmt(Math.abs(hospitalDiff))}.`;
             } else {
-                excessEl.className = "font-bold text-green-300"; // Profit
-                excessEl.parentElement.previousElementSibling.innerText = "Surplus RS";
+                 // Hospital Profit
+                 excessEl.innerText = fmt(hospitalDiff);
+                 excessEl.className = "font-bold text-green-300"; 
+                 excessEl.parentElement.previousElementSibling.innerText = "Surplus RS (Profit)";
+                 splitWarning.innerHTML = `<i class="fa-solid fa-check-circle mr-1"></i> Biaya RS dalam batas aman tarif paket.`;
             }
+
+            // Populate Detailed Table
+            const tbody = document.getElementById('bill-table-body');
+            tbody.innerHTML = '';
+            
+            mockBillItems.forEach(item => {
+                let statusBadge = item.coverable 
+                    ? `<span class="bg-green-100 text-green-800 text-xs px-2 py-0.5 rounded font-bold">Covered</span>`
+                    : `<span class="bg-red-100 text-red-800 text-xs px-2 py-0.5 rounded font-bold">Pasien</span>`;
+                
+                let patientCost = item.coverable ? 0 : item.amount;
+                
+                tbody.innerHTML += `
+                    <tr>
+                        <td class="py-2 px-3">${item.name}</td>
+                        <td class="py-2 px-3 text-right text-gray-600">${fmt(item.amount)}</td>
+                        <td class="py-2 px-3 text-center">${statusBadge}</td>
+                        <td class="py-2 px-3 text-right font-bold">${patientCost > 0 ? fmt(patientCost) : '-'}</td>
+                    </tr>
+                `;
+            });
+
+            document.getElementById('dt-total-real').innerText = fmt(totalBillReal);
+            document.getElementById('dt-total-patient').innerText = fmt(totalPatientPay);
+        }
+        
+        function toggleBillDetails() {
+            const section = document.getElementById('bill-details-section');
+            section.classList.toggle('hidden');
         }
 
         function resetCoding() {
             document.getElementById('icd10-select').value = "";
             document.getElementById('secondary-diag-list').innerHTML = "";
             document.getElementById('grouping-result').classList.add('hidden');
+            document.getElementById('bill-details-section').classList.add('hidden');
+        }
+        
+        function logApiCall(method, url, body = null) {
+            const container = document.getElementById('api-log-container');
+            const content = document.getElementById('api-log-content');
+            container.classList.remove('hidden');
+            
+            const timestamp = new Date().toLocaleTimeString();
+            let logLine = `[${timestamp}] <span class="text-blue-600 font-bold">${method}</span> ${url}`;
+            if(body) logLine += ` <span class="text-gray-400 text-[9px]">${JSON.stringify(body)}</span>`;
+            
+            const p = document.createElement('div');
+            p.className = "mb-1 border-b border-gray-200 pb-1";
+            p.innerHTML = logLine;
+            content.prepend(p);
         }
     </script>
 </body>
