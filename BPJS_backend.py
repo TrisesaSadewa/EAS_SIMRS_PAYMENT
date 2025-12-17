@@ -64,7 +64,7 @@ class GrouperRequest(BaseModel):
     secondary_icd10: List[str] = []
     discharge_status: str = "Pulang Sehat"
     birth_weight: int = 0
-    class_level: int = 1 # Treatment Class
+    class_level: int = 1
 
 class BillItem(BaseModel):
     name: str
@@ -82,7 +82,7 @@ class SimulationResponse(BaseModel):
     tariff: Optional[float] = None
     hospital_margin: Optional[float] = None
     
-    # Payment Split (New)
+    # Payment Split
     jasa_sarana: Optional[float] = None
     jasa_pelayanan: Optional[float] = None
     
@@ -95,7 +95,7 @@ class SimulationResponse(BaseModel):
     deductible: Optional[float] = None
     description: str
     description_suffix: Optional[str] = None
-    warning_flag: bool = False # For APS or Special cases
+    warning_flag: bool = False 
 
 class AutoFillResponse(BaseModel):
     found: bool
@@ -130,12 +130,13 @@ def check_eligibility(card_number: str):
         if not ins_info: ins_info = {"name": "Unknown", "type": "PRIVATE", "id": "unknown"}
 
         raw_type = ins_info.get('type')
-        db_type = raw_type.upper() if raw_type else 'PRIVATE'
         ins_name = ins_info.get('name', '').upper()
         
         normalized_type = 'PRIVATE'
-        if db_type in ['GOVERNMENT', 'BPJS', 'JKN']: normalized_type = 'GOVERNMENT'
-        elif db_type == 'COMPANY': normalized_type = 'COMPANY'
+        if raw_type:
+            rt = raw_type.upper()
+            if rt in ['GOVERNMENT', 'BPJS', 'JKN']: normalized_type = 'GOVERNMENT'
+            elif rt == 'COMPANY': normalized_type = 'COMPANY'
         if 'BPJS' in ins_name: normalized_type = 'GOVERNMENT'
             
         cov_rules = None
@@ -227,7 +228,6 @@ def calculate_benefits(payload: GrouperRequest):
             
         insurance_data = pat_res.data[0]['insurances']
         patient_id = pat_res.data[0]['patient_id']
-        hak_kelas = pat_res.data[0].get('class_id', 3) # Class from Card
         
         raw_type = insurance_data.get('type')
         normalized_type = 'PRIVATE'
@@ -236,88 +236,100 @@ def calculate_benefits(payload: GrouperRequest):
         if 'BPJS' in insurance_data.get('name', '').upper():
             normalized_type = 'GOVERNMENT'
 
-        # Fetch Real Bill
+        # --- BILL CALCULATION LOGIC ---
         total_bill = 0.0
         bill_items = []
-        inv_res = supabase.table("invoices").select("id").eq("patient_id", patient_id).order("created_at", desc=True).limit(1).execute()
+        
+        # 1. Get Latest Invoice
+        inv_res = supabase.table("invoices").select("id, total_amount").eq("patient_id", patient_id).order("created_at", desc=True).limit(1).execute()
+        
+        real_invoice_found = False
         
         if inv_res.data:
-            details = supabase.table("invoice_details").select("*").eq("invoice_id", inv_res.data[0]['id']).execute()
-            for item in details.data:
-                cost = float(item['subtotal'])
-                total_bill += cost
-                bill_items.append(BillItem(name=item['item_name'], category=item['item_type'], amount=cost))
+            invoice = inv_res.data[0]
+            # 2. Get Details
+            details = supabase.table("invoice_details").select("*").eq("invoice_id", invoice['id']).execute()
+            
+            if details.data and len(details.data) > 0:
+                real_invoice_found = True
+                for item in details.data:
+                    cost = float(item['subtotal'])
+                    total_bill += cost
+                    bill_items.append(BillItem(name=item['item_name'], category=item['item_type'], amount=cost))
+            
+            # 3. Fallback: Use Invoice Header Total if details are missing
+            elif invoice.get('total_amount') and float(invoice['total_amount']) > 0:
+                real_invoice_found = True
+                total_bill = float(invoice['total_amount'])
+                bill_items.append(BillItem(name="Total Invoice (Header)", category="system", amount=total_bill))
+
+        # --- PRICES FOR SIMULATION (Used if no real bill) ---
+        sim_diag_price = 0.0
+        sim_proc_price = 0.0
+        diag_name = "Unknown"
+        
+        t10 = supabase.table("tariff_icd10").select("price, name").eq("code", payload.icd10_code).limit(1).execute()
+        if t10.data: 
+            sim_diag_price = float(t10.data[0]['price'])
+            diag_name = t10.data[0]['name']
+        
+        if payload.icd9_code:
+            t9 = supabase.table("tariff_icd9").select("price").eq("code", payload.icd9_code).limit(1).execute()
+            if t9.data: sim_proc_price = float(t9.data[0]['price'])
 
         # --- BPJS LOGIC ---
         if normalized_type == 'GOVERNMENT':
             print("   🏥 Mode: INA-CBG (Government)")
             group_code = "UNSPECIFIED"
             
-            # 1. Base Logic from DB
             try:
                 map_res = supabase.table("ref_medical_codes").select("target_inacbg_code").eq("code", payload.icd10_code).limit(1).execute()
                 if map_res.data: group_code = map_res.data[0]['target_inacbg_code']
             except Exception: pass
 
-            diag_price = 0.0
-            proc_price = 0.0
             severity = "I"
-            desc = "Calculated Tariff"
+            desc = diag_name
 
-            t10 = supabase.table("tariff_icd10").select("price, name").eq("code", payload.icd10_code).limit(1).execute()
-            if t10.data:
-                diag_price = float(t10.data[0]['price'])
-                desc = t10.data[0]['name']
+            if payload.icd9_code: severity = "II"
 
-            if payload.icd9_code:
-                t9 = supabase.table("tariff_icd9").select("price").eq("code", payload.icd9_code).limit(1).execute()
-                if t9.data:
-                    proc_price = float(t9.data[0]['price'])
-                    severity = "II"
-
-            # 2. Logic: Komorbiditas
+            # Logic: Komorbiditas
             if len(payload.secondary_icd10) > 0:
                 severity = "III" if severity == "II" else "II"
-                diag_price += (diag_price * 0.2 * len(payload.secondary_icd10))
+                sim_diag_price += (sim_diag_price * 0.2 * len(payload.secondary_icd10))
 
-            # 3. Logic: Neonatal
+            # Logic: Neonatal
             if payload.birth_weight > 0 and payload.birth_weight < 2500:
                 group_code = "P-8-XX"
                 desc = f"Neonatal <2500g ({desc})"
-                diag_price *= 1.5
+                sim_diag_price *= 1.5
 
-            raw_tariff = diag_price + proc_price
+            raw_tariff = sim_diag_price + sim_proc_price
             
-            # 4. Logic: Kelas Perawatan vs Hak Kelas (Naik Kelas)
-            # Basic multiplier for Class
             class_multiplier = 1.0
             if payload.class_level == 2: class_multiplier = 1.2
             elif payload.class_level == 1: class_multiplier = 1.4
             
             final_tariff = raw_tariff * class_multiplier
             
-            # --- APS LOGIC (Pulang Paksa) ---
-            # Perpres No 59 Th 2024: APS = Gugur Klaim
             is_aps = payload.discharge_status == "APS"
             covered = final_tariff
             excess = 0.0
             warning = False
             desc_suffix = ""
             
-            # Split Calculation (Jasa Sarana 56% min, Pelayanan 44% max)
             j_sarana = final_tariff * 0.56
             j_pelayanan = final_tariff * 0.44
 
+            # Use simulated bill if real one not found
+            if not real_invoice_found or total_bill == 0:
+                total_bill = final_tariff * 0.85 # Assume 15% margin for demo
+                bill_items.append(BillItem(name="Estimasi Biaya RS (Simulasi)", category="system", amount=total_bill))
+
             if is_aps:
-                print("   ⚠️ DISCHARGE STATUS: APS (Claim Voided)")
                 warning = True
                 desc_suffix = " (GUGUR KLAIM - APS)"
                 covered = 0.0
-                excess = total_bill # Patient pays full bill
-            elif total_bill == 0:
-                # Sim mode fallback
-                total_bill = final_tariff * 0.85
-                bill_items.append(BillItem(name="Estimasi Biaya RS", category="system", amount=total_bill))
+                excess = total_bill 
                 
             return SimulationResponse(
                 simulation_type="INA-CBG",
@@ -349,9 +361,19 @@ def calculate_benefits(payload: GrouperRequest):
                 plafon = float(rule.get('plafon_limit', 0))
                 deductible = float(rule.get('deductible', 0))
 
-            if total_bill == 0:
-                total_bill = 4500000 
-                bill_items.append(BillItem(name="Biaya Rawat Inap", category="system", amount=total_bill))
+            # DYNAMIC BILL SIMULATION (If real invoice missing)
+            if not real_invoice_found or total_bill == 0:
+                # Base bill from codes
+                total_bill = sim_diag_price + sim_proc_price
+                
+                # Add extra for secondary diagnoses
+                if len(payload.secondary_icd10) > 0:
+                    total_bill += (sim_diag_price * 0.3 * len(payload.secondary_icd10))
+                
+                # Add base room/admin fee if bill is too low
+                if total_bill < 500000: total_bill += 500000
+                
+                bill_items = [BillItem(name="Simulasi Biaya Medis (Diagnosa + Tindakan)", category="system", amount=total_bill)]
 
             bill_after_deductible = max(0, total_bill - deductible)
             initial_covered = bill_after_deductible * (coverage_pct / 100.0)
