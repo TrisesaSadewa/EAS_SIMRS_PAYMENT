@@ -75,27 +75,19 @@ class SimulationResponse(BaseModel):
     simulation_type: str
     real_bill: float
     bill_items: List[BillItem]
-    
-    # BPJS Components
     inacbg_code: Optional[str] = None
     severity: Optional[str] = None
     tariff: Optional[float] = None
     hospital_margin: Optional[float] = None
-    
-    # Payment Split
-    jasa_sarana: Optional[float] = None
-    jasa_pelayanan: Optional[float] = None
-    
-    # Financial Impact
     covered_amount: Optional[float] = None
     patient_excess: Optional[float] = None
-    
-    # Private/Rules
     plafon_limit: Optional[float] = None
     deductible: Optional[float] = None
     description: str
     description_suffix: Optional[str] = None
-    warning_flag: bool = False 
+    warning_flag: bool = False
+    jasa_sarana: Optional[float] = None
+    jasa_pelayanan: Optional[float] = None
 
 class AutoFillResponse(BaseModel):
     found: bool
@@ -109,16 +101,36 @@ class AutoFillResponse(BaseModel):
 def check_eligibility(card_number: str):
     print(f"\n🔍 [LOOKUP] Checking Card: {card_number}")
     try:
+        # Check if input is MR Number or Name first to get card number
+        card_to_search = card_number
+        
+        # Try MR Number
+        p_res = supabase.table("patients").select("id").eq("mr_no", card_number).execute()
+        patient_id = p_res.data[0]['id'] if p_res.data else None
+        
+        # Try Name (if MR not found)
+        if not patient_id:
+            p_res = supabase.table("patients").select("id").ilike("full_name", f"%{card_number}%").execute()
+            if p_res.data: patient_id = p_res.data[0]['id']
+            
+        # If found via MR/Name, get the active insurance card
+        if patient_id:
+            ins_res = supabase.table("patient_insurances").select("card_number").eq("patient_id", patient_id).order("created_at", desc=True).limit(1).execute()
+            if ins_res.data:
+                card_to_search = ins_res.data[0]['card_number']
+                print(f"   ℹ️ Resolved '{card_number}' to Card: {card_to_search}")
+
+        # Perform Main Eligibility Check
         response = supabase.table("patient_insurances")\
             .select("*, patients(full_name, nik, gender), insurances(*)")\
-            .eq("card_number", card_number)\
+            .eq("card_number", card_to_search)\
             .order("created_at", desc=True)\
             .limit(1)\
             .execute()
 
         if not response.data:
             print("   ❌ Card not found")
-            raise HTTPException(status_code=404, detail=f"No. Kartu {card_number} tidak ditemukan.")
+            raise HTTPException(status_code=404, detail=f"Data tidak ditemukan untuk: {card_number}")
 
         data = response.data[0]
         
@@ -126,17 +138,15 @@ def check_eligibility(card_number: str):
              raise HTTPException(status_code=400, detail="Status Kepesertaan TIDAK AKTIF.")
         
         patient_info = data.get("patients")
-        ins_info = data.get("insurances")
-        if not ins_info: ins_info = {"name": "Unknown", "type": "PRIVATE", "id": "unknown"}
+        ins_info = data.get("insurances") or {"name": "Unknown", "type": "PRIVATE", "id": "unknown"}
 
         raw_type = ins_info.get('type')
+        db_type = raw_type.upper() if raw_type else 'PRIVATE'
         ins_name = ins_info.get('name', '').upper()
         
         normalized_type = 'PRIVATE'
-        if raw_type:
-            rt = raw_type.upper()
-            if rt in ['GOVERNMENT', 'BPJS', 'JKN']: normalized_type = 'GOVERNMENT'
-            elif rt == 'COMPANY': normalized_type = 'COMPANY'
+        if db_type in ['GOVERNMENT', 'BPJS', 'JKN']: normalized_type = 'GOVERNMENT'
+        elif db_type == 'COMPANY': normalized_type = 'COMPANY'
         if 'BPJS' in ins_name: normalized_type = 'GOVERNMENT'
             
         cov_rules = None
@@ -236,34 +246,29 @@ def calculate_benefits(payload: GrouperRequest):
         if 'BPJS' in insurance_data.get('name', '').upper():
             normalized_type = 'GOVERNMENT'
 
-        # --- BILL CALCULATION LOGIC ---
+        # Bill Logic
         total_bill = 0.0
         bill_items = []
-        
-        # 1. Get Latest Invoice
         inv_res = supabase.table("invoices").select("id, total_amount").eq("patient_id", patient_id).order("created_at", desc=True).limit(1).execute()
         
         real_invoice_found = False
         
         if inv_res.data:
             invoice = inv_res.data[0]
-            # 2. Get Details
             details = supabase.table("invoice_details").select("*").eq("invoice_id", invoice['id']).execute()
             
-            if details.data and len(details.data) > 0:
+            if details.data:
                 real_invoice_found = True
                 for item in details.data:
                     cost = float(item['subtotal'])
                     total_bill += cost
                     bill_items.append(BillItem(name=item['item_name'], category=item['item_type'], amount=cost))
-            
-            # 3. Fallback: Use Invoice Header Total if details are missing
             elif invoice.get('total_amount') and float(invoice['total_amount']) > 0:
                 real_invoice_found = True
                 total_bill = float(invoice['total_amount'])
                 bill_items.append(BillItem(name="Total Invoice (Header)", category="system", amount=total_bill))
 
-        # --- PRICES FOR SIMULATION (Used if no real bill) ---
+        # Simulation Prices
         sim_diag_price = 0.0
         sim_proc_price = 0.0
         diag_name = "Unknown"
@@ -277,7 +282,6 @@ def calculate_benefits(payload: GrouperRequest):
             t9 = supabase.table("tariff_icd9").select("price").eq("code", payload.icd9_code).limit(1).execute()
             if t9.data: sim_proc_price = float(t9.data[0]['price'])
 
-        # --- BPJS LOGIC ---
         if normalized_type == 'GOVERNMENT':
             print("   🏥 Mode: INA-CBG (Government)")
             group_code = "UNSPECIFIED"
@@ -291,13 +295,10 @@ def calculate_benefits(payload: GrouperRequest):
             desc = diag_name
 
             if payload.icd9_code: severity = "II"
-
-            # Logic: Komorbiditas
             if len(payload.secondary_icd10) > 0:
                 severity = "III" if severity == "II" else "II"
                 sim_diag_price += (sim_diag_price * 0.2 * len(payload.secondary_icd10))
 
-            # Logic: Neonatal
             if payload.birth_weight > 0 and payload.birth_weight < 2500:
                 group_code = "P-8-XX"
                 desc = f"Neonatal <2500g ({desc})"
@@ -320,9 +321,8 @@ def calculate_benefits(payload: GrouperRequest):
             j_sarana = final_tariff * 0.56
             j_pelayanan = final_tariff * 0.44
 
-            # Use simulated bill if real one not found
             if not real_invoice_found or total_bill == 0:
-                total_bill = final_tariff * 0.85 # Assume 15% margin for demo
+                total_bill = final_tariff * 0.85
                 bill_items.append(BillItem(name="Estimasi Biaya RS (Simulasi)", category="system", amount=total_bill))
 
             if is_aps:
@@ -347,8 +347,6 @@ def calculate_benefits(payload: GrouperRequest):
                 warning_flag=warning,
                 plafon_limit=0, deductible=0
             )
-        
-        # --- PRIVATE LOGIC ---
         else:
             print(f"   🛡️ Mode: Private Coverage")
             cov_res = supabase.table("insurance_coverages").select("*").eq("insurance_id", insurance_data['id']).limit(1).execute()
@@ -361,19 +359,14 @@ def calculate_benefits(payload: GrouperRequest):
                 plafon = float(rule.get('plafon_limit', 0))
                 deductible = float(rule.get('deductible', 0))
 
-            # DYNAMIC BILL SIMULATION (If real invoice missing)
             if not real_invoice_found or total_bill == 0:
-                # Base bill from codes
                 total_bill = sim_diag_price + sim_proc_price
-                
-                # Add extra for secondary diagnoses
                 if len(payload.secondary_icd10) > 0:
                     total_bill += (sim_diag_price * 0.3 * len(payload.secondary_icd10))
-                
-                # Add base room/admin fee if bill is too low
                 if total_bill < 500000: total_bill += 500000
-                
-                bill_items = [BillItem(name="Simulasi Biaya Medis (Diagnosa + Tindakan)", category="system", amount=total_bill)]
+                if payload.class_level <= 3 and total_bill < 2000000:
+                     total_bill = 2000000 + total_bill 
+                bill_items = [BillItem(name="Simulasi Biaya Medis", category="system", amount=total_bill)]
 
             bill_after_deductible = max(0, total_bill - deductible)
             initial_covered = bill_after_deductible * (coverage_pct / 100.0)
@@ -392,7 +385,6 @@ def calculate_benefits(payload: GrouperRequest):
                 deductible=deductible,
                 description_suffix=""
             )
-
     except Exception as e:
         print(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -401,9 +393,19 @@ def calculate_benefits(payload: GrouperRequest):
 def get_bill_details(card_number: str):
     print(f"\n🔍 [AUTOFILL] Checking invoice for: {card_number}")
     try:
-        pat_query = supabase.table("patient_insurances").select("patient_id").eq("card_number", card_number).limit(1).execute()
-        if not pat_query.data: return AutoFillResponse(found=False)
-        patient_id = pat_query.data[0]['patient_id']
+        # First try to resolve card_number if it's actually an MR or Name
+        search_card = card_number
+        p_res = supabase.table("patients").select("id").eq("mr_no", card_number).execute()
+        if p_res.data:
+            patient_id = p_res.data[0]['id']
+        else:
+            p_res = supabase.table("patients").select("id").ilike("full_name", f"%{card_number}%").execute()
+            if p_res.data: patient_id = p_res.data[0]['id']
+            else:
+                 # Assume it's a card number
+                pat_query = supabase.table("patient_insurances").select("patient_id").eq("card_number", card_number).limit(1).execute()
+                if not pat_query.data: return AutoFillResponse(found=False)
+                patient_id = pat_query.data[0]['patient_id']
 
         inv_query = supabase.table("invoices").select("id").eq("patient_id", patient_id).order("created_at", desc=True).limit(1).execute()
         if not inv_query.data: return AutoFillResponse(found=False)
@@ -422,7 +424,6 @@ def get_bill_details(card_number: str):
         
         print(f"   ✅ Invoice Found: {invoice_id} | ICD10: {icd10} | ICD9: {icd9}")
         return AutoFillResponse(found=True, icd10=icd10, icd9=icd9, invoice_id=invoice_id)
-
     except Exception as e:
         print(f"Error: {e}")
         return AutoFillResponse(found=False)
@@ -435,6 +436,50 @@ def get_references():
         return {"icd10": icd10.data or [], "icd9": icd9.data or []}
     except Exception as e:
         return {"icd10": [], "icd9": []}
+
+# --- NEW: Patient Search Endpoint ---
+@app.get("/api/patients/search")
+def search_patients(query: str):
+    try:
+        # Search by Name or MR No in 'patients' table
+        pat_res = supabase.table("patients").select("id, full_name, mr_no").or_(f"full_name.ilike.%{query}%,mr_no.ilike.%{query}%").limit(3).execute()
+        
+        results = []
+        if pat_res.data:
+            for p in pat_res.data:
+                card_res = supabase.table("patient_insurances").select("card_number, insurances(name)").eq("patient_id", p['id']).limit(1).execute()
+                
+                card_no = "-"
+                ins_name = "-"
+                if card_res.data:
+                    card_no = card_res.data[0]['card_number']
+                    ins_name = card_res.data[0]['insurances']['name'] if card_res.data[0]['insurances'] else "Unknown"
+                
+                results.append({
+                    "name": p['full_name'],
+                    "mr_no": p['mr_no'],
+                    "card_number": card_no,
+                    "insurance": ins_name
+                })
+        
+        if len(results) < 3:
+            card_search = supabase.table("patient_insurances").select("card_number, patients(full_name, mr_no), insurances(name)").ilike("card_number", f"%{query}%").limit(3 - len(results)).execute()
+            if card_search.data:
+                for c in card_search.data:
+                    if any(r['card_number'] == c['card_number'] for r in results): continue
+                    p = c.get('patients') or {}
+                    i = c.get('insurances') or {}
+                    results.append({
+                        "name": p.get('full_name', 'Unknown'),
+                        "mr_no": p.get('mr_no', '-'),
+                        "card_number": c['card_number'],
+                        "insurance": i.get('name', 'Unknown')
+                    })
+
+        return results
+    except Exception as e:
+        print(f"Search Error: {e}")
+        return []
 
 if __name__ == "__main__":
     print("🚀 Starting Multi-Payer Backend on Port 8000...")
