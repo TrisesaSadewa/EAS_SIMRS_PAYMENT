@@ -63,7 +63,7 @@
         </div>
     </div>
 
-    <!-- 2. APS WARNING MODAL (New!) -->
+    <!-- 2. APS WARNING MODAL -->
     <div id="aps-modal" class="fixed inset-0 z-[100] hidden" role="dialog" aria-modal="true">
         <div class="fixed inset-0 bg-red-900/80 backdrop-blur-md transition-opacity" onclick="closeApsModal()"></div>
         <div class="fixed inset-0 z-10 w-screen overflow-y-auto">
@@ -111,7 +111,9 @@
             </div>
             
             <div class="flex items-center gap-6">
-                <!-- Button moved from here -->
+                <a href="index.html" class="hidden md:flex items-center gap-2 px-4 py-2 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors border border-slate-200">
+                    <i class="fa-solid fa-chevron-left"></i> Kembali ke Dashboard
+                </a>
                 <div class="text-right hidden sm:block">
                     <span class="block text-sm font-bold text-slate-700">Admin Asuransi</span>
                     <span class="text-xs text-gray-500">Finance Office</span>
@@ -133,11 +135,13 @@
                 </div>
                 
                 <div class="p-5">
-                    <label class="block text-xs font-bold text-gray-500 mb-1.5 uppercase tracking-wider">Nomor Kartu</label>
-                    <div class="flex gap-2 mb-4">
-                        <input type="text" id="card-input" value="CARD-36F785D1" 
-                               class="flex-1 border border-gray-200 rounded-lg px-3 py-2.5 text-sm font-mono focus:ring-2 focus:ring-blue-500 outline-none" 
-                               placeholder="Scan Card...">
+                    <label class="block text-xs font-bold text-gray-500 mb-1.5 uppercase tracking-wider">Cari Pasien (No. RM / Nama / Kartu)</label>
+                    <div class="flex gap-2 mb-4 relative z-50">
+                        <div class="relative flex-1">
+                            <input type="text" id="card-input" class="w-full pl-3 pr-3 border border-gray-200 rounded-lg py-2.5 text-sm font-mono focus:ring-2 focus:ring-blue-500 outline-none" 
+                                   placeholder="Ketik Nama/RM/Kartu..." autocomplete="off">
+                            <div id="search-results" class="absolute top-full left-0 w-full bg-white border border-gray-200 rounded-lg shadow-xl mt-1 hidden max-h-60 overflow-y-auto z-50"></div>
+                        </div>
                         <button onclick="checkEligibility()" id="btn-check"
                                 class="bg-slate-800 hover:bg-slate-700 text-white px-5 py-2.5 rounded-lg text-sm font-semibold transition-all">
                             Cek
@@ -174,6 +178,11 @@
                                     <span class="text-gray-500">Jenis Kelamin</span>
                                     <span class="font-medium text-gray-600" id="res-gender">-</span>
                                 </div>
+                                <!-- Added Class Level Display -->
+                                <div class="flex justify-between text-xs border-b border-gray-200 pb-1.5">
+                                    <span class="text-gray-500">Hak Kelas</span>
+                                    <span class="font-bold text-gray-700" id="res-class">-</span>
+                                </div>
                             </div>
                         </div>
 
@@ -202,12 +211,10 @@
                 <h4 class="text-[10px] font-bold text-gray-400 uppercase mb-2">System Log</h4>
                 <div id="api-log-content" class="h-32 overflow-y-auto space-y-2 pr-1 custom-scrollbar text-[10px] font-mono text-gray-500"></div>
             </div>
-
-            <!-- BACK TO DASHBOARD BUTTON (New Location) -->
+            
             <a href="index.html" class="block w-full text-center px-4 py-3 mt-6 text-sm font-bold text-slate-600 bg-white hover:bg-slate-50 border border-gray-200 rounded-xl transition-all shadow-sm group">
                 <i class="fa-solid fa-chevron-left mr-2 group-hover:-translate-x-1 transition-transform"></i> Kembali ke Dashboard
             </a>
-
         </section>
 
         <!-- RIGHT COL: Calculation -->
@@ -274,12 +281,12 @@
                             </div>
                         </div>
                         
-                        <!-- Default Display (Hidden when checkbox checked) -->
+                        <!-- Default Display -->
                         <div id="default-class-display" class="block w-full px-3 py-2.5 text-sm border border-gray-200 bg-gray-50 rounded-lg text-gray-500 italic">
                             Sesuai Hak Kelas
                         </div>
 
-                        <!-- Dropdown (Shown when checkbox checked) -->
+                        <!-- Dropdown -->
                         <select id="upgrade-class-select" class="hidden w-full px-3 py-2.5 text-sm border border-gray-300 rounded-lg bg-white focus:ring-2 focus:ring-blue-500 animate-fade-in">
                             <option value="1">Kelas 1</option>
                             <option value="2">Kelas 2</option>
@@ -349,40 +356,95 @@
         const API_URL = "http://localhost:8000/api";
         let appState = { patient: null, icdList: [] };
         
+        // --- SAFE UPDATE HELPER ---
+        const safeSetText = (id, text) => {
+            const el = document.getElementById(id);
+            if (el) el.innerText = text;
+        };
+
         const fmtMoney = (n) => {
             if (n === undefined || n === null || isNaN(n)) return "Rp 0";
             return new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(n);
         };
         const log = (msg) => {
             const el = document.getElementById('api-log-content');
-            el.innerHTML = `<div class="mb-1 border-l-2 border-gray-300 pl-2">> ${msg}</div>` + el.innerHTML;
+            if (el) el.innerHTML = `<div class="mb-1 border-l-2 border-gray-300 pl-2">> ${msg}</div>` + el.innerHTML;
         };
+
+        let searchTimeout;
+        const searchInput = document.getElementById('card-input');
+        const resultsBox = document.getElementById('search-results');
 
         window.onload = function() { 
             fetchReferences(); 
-            // Listen for Escape Key to close all modals
             document.addEventListener('keydown', function(event) {
                 if (event.key === "Escape") {
                     closeErrorModal();
                     closeApsModal();
+                    if(resultsBox) resultsBox.classList.add('hidden');
                 }
             });
             
-            // Listener for ICD-10 Change
             document.getElementById('icd10-select').addEventListener('change', function() {
                 checkNeonatal(this.value);
+            });
+
+            // Auto-complete logic
+            searchInput.addEventListener('input', (e) => {
+                clearTimeout(searchTimeout);
+                const q = e.target.value;
+                if(q.length < 2) {
+                    resultsBox.classList.add('hidden');
+                    return;
+                }
+                
+                searchTimeout = setTimeout(async () => {
+                    try {
+                        const res = await fetch(`${API_URL}/patients/search?query=${q}`);
+                        const data = await res.json();
+                        
+                        resultsBox.innerHTML = '';
+                        if(data.length > 0) {
+                            resultsBox.classList.remove('hidden');
+                            data.forEach(item => {
+                                const div = document.createElement('div');
+                                div.className = "px-4 py-3 hover:bg-slate-50 cursor-pointer border-b border-gray-50 last:border-0";
+                                div.innerHTML = `
+                                    <p class="text-sm font-bold text-slate-700">${item.name} <span class="font-normal text-xs text-gray-400">(${item.mr_no})</span></p>
+                                    <div class="flex justify-between items-center mt-1">
+                                        <span class="text-xs font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">${item.card_number}</span>
+                                        <span class="text-[10px] text-gray-500">${item.insurance}</span>
+                                    </div>
+                                `;
+                                div.onclick = () => {
+                                    searchInput.value = item.card_number;
+                                    resultsBox.classList.add('hidden');
+                                };
+                                resultsBox.appendChild(div);
+                            });
+                        } else {
+                            resultsBox.classList.add('hidden');
+                        }
+                    } catch(e) { console.error(e); }
+                }, 300);
+            });
+
+            document.addEventListener('click', (e) => {
+                if (!searchInput.contains(e.target) && !resultsBox.contains(e.target)) {
+                    resultsBox.classList.add('hidden');
+                }
             });
         };
 
         // --- MODAL FUNCTIONS ---
         function showError(msg) {
-            document.getElementById('modal-message').innerText = msg;
+            safeSetText('modal-message', msg);
             document.getElementById('error-modal').classList.remove('hidden');
         }
         function closeErrorModal() { document.getElementById('error-modal').classList.add('hidden'); }
 
         function showApsModal(amount) {
-            document.getElementById('aps-modal-amount').innerText = amount;
+            safeSetText('aps-modal-amount', amount);
             document.getElementById('aps-modal').classList.remove('hidden');
         }
         function closeApsModal() { document.getElementById('aps-modal').classList.add('hidden'); }
@@ -419,7 +481,6 @@
             }
         }
 
-        // --- NEW: Check Neonatal Condition ---
         function checkNeonatal(code) {
             const container = document.getElementById('birth-weight-container');
             if (code && (code.toUpperCase().startsWith('P') || code.toUpperCase().startsWith('Z38'))) {
@@ -458,7 +519,6 @@
             document.getElementById('birth-weight').value = '';
             document.getElementById('discharge-status').selectedIndex = 0;
             
-            // Reset Class Upgrade
             document.getElementById('upgrade-class-check').checked = false;
             toggleClassSelect();
             
@@ -469,6 +529,8 @@
             document.getElementById('result-card').classList.add('hidden');
             document.getElementById('birth-weight-container').classList.add('hidden'); 
             
+            document.getElementById('aps-modal').classList.add('hidden');
+            
             log("Form has been reset manually.");
         }
 
@@ -477,6 +539,15 @@
             const cardNo = document.getElementById('card-input').value;
             btn.innerHTML = '...';
             
+            // CLEAR OLD DOC INFO TO PREVENT CONFUSION
+            document.getElementById('doc-card').classList.add('hidden');
+            document.getElementById('btn-calc').disabled = true;
+            document.getElementById('btn-calc').classList.add('bg-gray-100', 'text-gray-400', 'cursor-not-allowed');
+            document.getElementById('btn-calc').classList.remove('bg-slate-800', 'text-white', 'hover:bg-slate-700');
+            // Hide old result card immediately
+            document.getElementById('eligibility-result').classList.add('hidden');
+            resetSimulation();
+
             try {
                 const res = await fetch(`${API_URL}/eligibility/${cardNo}`);
                 const data = await res.json();
@@ -513,61 +584,78 @@
                     log(`Invoice found! Auto-filling...`);
                     if(data.icd10) {
                         const sel = document.getElementById('icd10-select');
-                        sel.value = data.icd10;
-                        sel.classList.add('ring-2', 'ring-blue-500');
-                        document.getElementById('icd10-hint').classList.remove('hidden');
-                        checkNeonatal(data.icd10); 
+                        if (sel) {
+                            sel.value = data.icd10;
+                            sel.classList.add('ring-2', 'ring-blue-500');
+                            document.getElementById('icd10-hint').classList.remove('hidden');
+                            checkNeonatal(data.icd10); 
+                        }
                     }
                     if(data.icd9) {
                         const sel = document.getElementById('icd9-select');
-                        sel.value = data.icd9;
-                        sel.classList.add('ring-2', 'ring-blue-500');
-                        document.getElementById('icd9-hint').classList.remove('hidden');
+                        if (sel) {
+                            sel.value = data.icd9;
+                            sel.classList.add('ring-2', 'ring-blue-500');
+                            document.getElementById('icd9-hint').classList.remove('hidden');
+                        }
                     }
                 }
             } catch(e) { log("Auto-fill skipped"); }
         }
 
         function renderPatientInfo(data) {
-            document.getElementById('eligibility-result').classList.remove('hidden');
-            document.getElementById('res-name').innerText = data.patient_name;
-            document.getElementById('res-nik').innerText = data.nik;
-            document.getElementById('res-insurance-name').innerText = data.insurance_name;
-            document.getElementById('res-gender').innerText = data.gender || '-'; // Display Gender
+            const resultBox = document.getElementById('eligibility-result');
+            if (resultBox) resultBox.classList.remove('hidden');
+            
+            safeSetText('res-name', data.patient_name);
+            safeSetText('res-nik', data.nik);
+            safeSetText('res-insurance-name', data.insurance_name);
+            safeSetText('res-gender', data.gender || '-');
+            safeSetText('res-class', data.class_level ? `Kelas ${data.class_level}` : '-');
             
             const header = document.getElementById('card-header');
             const icon = document.getElementById('nav-icon');
             const btnCreate = document.getElementById('btn-create-doc');
+            
+            // Reset Button State (in case it was set to "Selesai")
+            if (btnCreate) {
+                btnCreate.innerHTML = '<i class="fa-solid fa-file-signature"></i> <span id="btn-create-text">Buat Dokumen</span>';
+            }
+
             const statusBox = document.getElementById('status-box');
             const statusIcon = document.getElementById('status-icon');
+            const privateRules = document.getElementById('private-rules');
+            const classContainer = document.getElementById('class-change-container');
             
             if (data.insurance_type === 'GOVERNMENT') {
                 header.className = "bg-bpjs-600 px-5 py-4 flex justify-between items-center transition-colors duration-500";
                 icon.className = "bg-bpjs-500 text-white p-2.5 rounded-xl shadow-lg";
                 btnCreate.className = "w-full bg-bpjs-500 hover:bg-bpjs-600 text-white py-3 rounded-xl text-sm font-bold shadow-lg transition-all flex justify-center items-center gap-2";
-                document.getElementById('btn-create-text').innerText = "Terbitkan SEP (BPJS)";
-                document.getElementById('private-rules').classList.add('hidden');
-                document.getElementById('class-change-container').classList.remove('hidden'); // Show Pindah Kelas for BPJS
+                safeSetText('btn-create-text', "Terbitkan SEP (BPJS)");
+                if (privateRules) privateRules.classList.add('hidden');
+                if (classContainer) classContainer.classList.remove('hidden'); 
+                safeSetText('default-class-display', `Sesuai Hak Kelas (Kelas ${data.class_level})`); // Update class text
+                
                 statusBox.className = "bg-green-50 border border-green-100 rounded-xl p-4 mb-4";
                 statusIcon.className = "bg-green-100 p-2 rounded-full text-green-600 shadow-sm";
-                document.getElementById('sim-mode').innerText = "Mode: INA-CBG (Package)";
+                safeSetText('sim-mode', "Mode: INA-CBG (Package)");
             } else {
                 header.className = "bg-private-600 px-5 py-4 flex justify-between items-center transition-colors duration-500";
                 icon.className = "bg-private-500 text-white p-2.5 rounded-xl shadow-lg";
                 btnCreate.className = "w-full bg-private-500 hover:bg-private-600 text-white py-3 rounded-xl text-sm font-bold shadow-lg transition-all flex justify-center items-center gap-2";
-                document.getElementById('btn-create-text').innerText = "Buat Guarantee Letter";
-                document.getElementById('private-rules').classList.remove('hidden');
-                document.getElementById('class-change-container').classList.add('hidden'); // Hide for Private
+                safeSetText('btn-create-text', "Buat Guarantee Letter");
+                if (privateRules) privateRules.classList.remove('hidden');
+                if (classContainer) classContainer.classList.add('hidden');
                 
                 const rules = data.coverage_rules;
                 const covPct = rules ? rules.coverage_percentage + "%" : "N/A";
                 const plafonVal = rules ? fmtMoney(rules.plafon_limit) : "N/A";
-                document.getElementById('res-cov-pct').innerText = covPct;
-                document.getElementById('res-plafon').innerText = plafonVal;
+                safeSetText('res-cov-pct', covPct);
+                safeSetText('res-plafon', plafonVal);
                 
                 statusBox.className = "bg-purple-50 border border-purple-100 rounded-xl p-4 mb-4";
                 statusIcon.className = "bg-purple-100 p-2 rounded-full text-purple-600 shadow-sm";
-                document.getElementById('sim-mode').innerText = "Mode: Coverage Analysis (Private)";
+                safeSetText('sim-mode', "Mode: Coverage Analysis (Private)");
             }
             if(data.sep_no) fillDocInfo(data.sep_no);
         }
@@ -593,11 +681,12 @@
 
         function fillDocInfo(num) {
             document.getElementById('doc-card').classList.remove('hidden');
-            document.getElementById('doc-number').innerText = num;
+            safeSetText('doc-number', num);
             document.getElementById('btn-calc').disabled = false;
             document.getElementById('btn-calc').classList.remove('bg-gray-100', 'text-gray-400', 'cursor-not-allowed');
             document.getElementById('btn-calc').classList.add('bg-slate-800', 'text-white', 'hover:bg-slate-700');
-            document.getElementById('doc-label').innerText = appState.patient.insurance_type === 'GOVERNMENT' ? 'Nomor SEP' : 'No. Guarantee Letter';
+            const label = appState.patient.insurance_type === 'GOVERNMENT' ? 'Nomor SEP' : 'No. Guarantee Letter';
+            safeSetText('doc-label', label);
         }
 
         async function calculateBenefits() {
@@ -606,9 +695,9 @@
             
             const secDiags = Array.from(document.querySelectorAll('.sec-diag-select')).map(s => s.value).filter(v => v);
             
-            // Determine class level (Override if checked)
             let selectedClass = appState.patient.class_level || 3;
-            if (document.getElementById('upgrade-class-check').checked) {
+            const upgradeCheck = document.getElementById('upgrade-class-check');
+            if (upgradeCheck && upgradeCheck.checked) {
                 selectedClass = parseInt(document.getElementById('upgrade-class-select').value);
             }
 
@@ -658,7 +747,7 @@
 
             const grid = document.getElementById('res-grid');
             grid.innerHTML = ''; 
-            document.getElementById('bill-total').innerText = fmtMoney(data.real_bill);
+            safeSetText('bill-total', fmtMoney(data.real_bill));
 
             // HANDLE APS (PULANG PAKSA) - SHOW POPUP
             if (data.warning_flag) {
@@ -669,41 +758,40 @@
 
             if (data.simulation_type === 'INA-CBG') {
                 card.style.background = "#0f172a"; 
-                document.getElementById('res-badge').innerText = "INA-CBG RESULT";
+                safeSetText('res-badge', "INA-CBG RESULT");
                 document.getElementById('res-badge').className = "bg-green-500 text-white text-[10px] font-bold px-2 py-0.5 rounded";
-                document.getElementById('res-title').innerText = data.inacbg_code;
-                document.getElementById('res-subtitle').innerText = data.description;
+                safeSetText('res-title', data.inacbg_code);
+                safeSetText('res-subtitle', data.description);
                 
                 grid.innerHTML += box("Severity", data.severity);
                 grid.innerHTML += box("Tariff Paket", fmtMoney(data.tariff), "text-green-400");
                 
                 // Show Split Payment
                 document.getElementById('bpjs-split').classList.remove('hidden');
-                document.getElementById('split-sarana').innerText = fmtMoney(data.jasa_sarana);
-                document.getElementById('split-pelayanan').innerText = fmtMoney(data.jasa_pelayanan);
+                safeSetText('split-sarana', fmtMoney(data.jasa_sarana));
+                safeSetText('split-pelayanan', fmtMoney(data.jasa_pelayanan));
 
-                document.getElementById('fin-label').innerText = "Hospital Margin";
+                safeSetText('fin-label', "Hospital Margin");
                 const margin = data.hospital_margin;
-                document.getElementById('fin-amount').innerText = fmtMoney(Math.abs(margin));
+                safeSetText('fin-amount', fmtMoney(Math.abs(margin)));
                 document.getElementById('fin-amount').className = margin < 0 ? "text-3xl font-bold text-red-400" : "text-3xl font-bold text-green-400";
-                document.getElementById('fin-note').innerText = margin < 0 ? "Warning: Cost exceeds tariff" : "Good efficiency";
+                safeSetText('fin-note', margin < 0 ? "Warning: Cost exceeds tariff" : "Good efficiency");
             } else {
                 card.style.background = "#4c1d95"; 
-                document.getElementById('res-badge').innerText = "COVERAGE ANALYSIS";
+                safeSetText('res-badge', "COVERAGE ANALYSIS");
                 document.getElementById('res-badge').className = "bg-purple-500 text-white text-[10px] font-bold px-2 py-0.5 rounded";
-                document.getElementById('res-title').innerText = "Private Insurance";
-                document.getElementById('res-subtitle').innerText = data.description;
+                safeSetText('res-title', "Private Insurance");
+                safeSetText('res-subtitle', data.description);
 
                 grid.innerHTML += box("Insurance Pays", fmtMoney(data.covered_amount), "text-green-300");
                 grid.innerHTML += box("Deductible", fmtMoney(data.deductible));
                 
-                document.getElementById('fin-label').innerText = "Patient Pays (Excess)";
-                // FIXED: Use data.patient_excess instead of undefined 'excess'
-                document.getElementById('fin-amount').innerText = fmtMoney(data.patient_excess);
+                safeSetText('fin-label', "Patient Pays (Excess)");
+                safeSetText('fin-amount', fmtMoney(data.patient_excess));
                 document.getElementById('fin-amount').className = "text-3xl font-bold text-orange-300";
                 
                 const note = data.patient_excess > 0 ? "Tagihan melebihi coverage / terkena deductible" : "Full Covered by Insurance";
-                document.getElementById('fin-note').innerText = note;
+                safeSetText('fin-note', note);
             }
         }
 
